@@ -818,6 +818,19 @@ void end_frame(EndFrameCallback callback) {
     g_resources.stats.lastIndexSize = stats.lastIndexSize;
     g_resources.stats.lastStorageSize = stats.lastStorageSize;
     g_resources.stats.lastTextureUploadSize = stats.lastTextureUploadSize;
+    // Each new high in 1 MiB steps: a full vertex, index or storage buffer aborts the frame.
+    static uint32_t loggedVerts = 0, loggedIndex = 0, loggedStorage = 0, loggedTextures = 0;
+    if (stats.lastVertSize >= loggedVerts + (1u << 20) || stats.lastIndexSize >= loggedIndex + (1u << 20) ||
+        stats.lastStorageSize >= loggedStorage + (1u << 20) ||
+        stats.lastTextureUploadSize >= loggedTextures + (1u << 20)) {
+      loggedVerts = std::max<uint32_t>(loggedVerts, stats.lastVertSize);
+      loggedIndex = std::max<uint32_t>(loggedIndex, stats.lastIndexSize);
+      loggedStorage = std::max<uint32_t>(loggedStorage, stats.lastStorageSize);
+      loggedTextures = std::max<uint32_t>(loggedTextures, stats.lastTextureUploadSize);
+      Log.info("Frame buffers: vertex {} of {}, index {} of {}, storage {} of {}, texture upload {} of {}",
+               stats.lastVertSize, VertexBufferSize, stats.lastIndexSize, IndexBufferSize, stats.lastStorageSize,
+               StorageBufferSize, stats.lastTextureUploadSize, TextureUploadSize);
+    }
 
     if (callback) {
       callback(encoder, std::move(afterSubmitCallbacks), replay);
