@@ -39,8 +39,9 @@ constexpr Module Log{"aurora::gamepad"};
 
 constexpr uint32_t kPortPreferencesMagic = SBIG('CPRT');
 // v2: identity is guid + serial. v3 (WiiCompiled): identity adds path + slot. v4: v3 plus a trailing
-// device rumble preference. Upstream Aurora's own v3 (v2 plus the trailer) is never written here.
-constexpr uint32_t kPortPreferencesVersion = 4;
+// device rumble preference. Upstream Aurora's own v3 (v2 plus the trailer) is never written here. v5: v4 with
+// PAD_MAX_ASSIGNABLE_PORTS ports instead of PAD_MAX_CONTROLLERS.
+constexpr uint32_t kPortPreferencesVersion = 5;
 constexpr uint32_t kMaxPersistedStringLength = 256;
 constexpr uint16_t kDefaultDeviceRumbleIntensityLow = 0x8000;
 constexpr uint16_t kDefaultDeviceRumbleIntensityHigh = 0x8000;
@@ -68,7 +69,7 @@ struct DevicePreference {
   uint16_t rumbleIntensityHigh = kDefaultDeviceRumbleIntensityHigh;
 };
 
-std::array<PortPreference, PAD_MAX_CONTROLLERS> g_portPreferences;
+std::array<PortPreference, PAD_MAX_ASSIGNABLE_PORTS> g_portPreferences;
 DevicePreference g_devicePreference;
 bool g_portPreferencesLoaded = false;
 // Startup controllers are added one by one via events; capture their SDL player index at init,
@@ -149,7 +150,7 @@ bool write_identity(SDL_IOStream* file, const ControllerIdentity& identity) {
          write_string(file, identity.path) && write_value(file, identity.slot);
 }
 
-bool read_port_preferences_file(std::array<PortPreference, PAD_MAX_CONTROLLERS>& preferences) {
+bool read_port_preferences_file(std::array<PortPreference, PAD_MAX_ASSIGNABLE_PORTS>& preferences) {
   const auto path = port_preferences_path();
   if (path.empty()) {
     return true;
@@ -166,11 +167,18 @@ bool read_port_preferences_file(std::array<PortPreference, PAD_MAX_CONTROLLERS>&
   bool ok = read_value(file.get(), magic) && read_value(file.get(), version) && magic == kPortPreferencesMagic &&
             version >= 2 && version <= kPortPreferencesVersion;
 
-  for (auto& preference : preferences) {
+  // Files before v5 hold only the GameCube ports, the others staying unset; an earlier 8-port build wrote v2 files
+  // that may carry the other ports after them.
+  const size_t ports = version >= 5 || version == 2 ? PAD_MAX_ASSIGNABLE_PORTS : PAD_MAX_CONTROLLERS;
+  for (size_t port = 0; ok && port < ports; ++port) {
+    auto& preference = preferences[port];
     uint8_t state = 0;
     ControllerIdentity identity;
-    ok = ok && read_value(file.get(), state) && state <= static_cast<uint8_t>(PortPreferenceState::Controller) &&
-         read_identity(file.get(), version, identity);
+    if (!read_value(file.get(), state)) {
+      ok = version == 2 && port >= PAD_MAX_CONTROLLERS;
+      break;
+    }
+    ok = state <= static_cast<uint8_t>(PortPreferenceState::Controller) && read_identity(file.get(), version, identity);
     if (ok) {
       preference.state = static_cast<PortPreferenceState>(state);
       preference.identity = std::move(identity);
@@ -194,7 +202,7 @@ void ensure_port_preferences_loaded() {
     return;
   }
 
-  std::array<PortPreference, PAD_MAX_CONTROLLERS> preferences;
+  std::array<PortPreference, PAD_MAX_ASSIGNABLE_PORTS> preferences;
   if (read_port_preferences_file(preferences)) {
     g_portPreferences = std::move(preferences);
   }
@@ -279,17 +287,18 @@ int32_t effective_player_index(const GameController& controller) {
 
 void apply_port_preferences() noexcept {
   ensure_port_preferences_loaded();
+  for (auto& [instance, controller] : g_GameControllers) {
+    const int32_t player = effective_player_index(controller);
+    // Keep SDL's default player assignment from taking explicitly configured ports, and every port past the
+    // GameCube ones: those only take the controller assigned there, matched below
+    if (player >= PAD_MAX_CONTROLLERS ||
+        (player >= 0 && g_portPreferences[player].state != PortPreferenceState::Unset)) {
+      assign_player_index(controller, -1);
+    }
+  }
   if (!std::any_of(g_portPreferences.begin(), g_portPreferences.end(),
                    [](const auto& preference) { return preference.state != PortPreferenceState::Unset; })) {
     return;
-  }
-
-  for (auto& [instance, controller] : g_GameControllers) {
-    const int32_t player = effective_player_index(controller);
-    if (player >= 0 && player < PAD_MAX_CONTROLLERS && g_portPreferences[player].state != PortPreferenceState::Unset) {
-      // Keep SDL's default player assignment from taking explicitly configured ports
-      assign_player_index(controller, -1);
-    }
   }
 
   struct Candidate {
@@ -317,8 +326,8 @@ void apply_port_preferences() noexcept {
     return a.port != b.port ? a.port < b.port : a.instance < b.instance;
   });
 
-  std::array<bool, PAD_MAX_CONTROLLERS> portClaimed{};
-  std::array<Uint32, PAD_MAX_CONTROLLERS> claimedInstances{};
+  std::array<bool, PAD_MAX_ASSIGNABLE_PORTS> portClaimed{};
+  std::array<Uint32, PAD_MAX_ASSIGNABLE_PORTS> claimedInstances{};
   size_t claimedCount = 0;
   bool upgraded = false;
   for (const auto& candidate : candidates) {
@@ -571,7 +580,7 @@ void set_device_rumble_intensity(const uint16_t low_freq_intensity, const uint16
 uint32_t controller_count() noexcept { return g_GameControllers.size(); }
 
 void persist_controller_for_player(uint32_t player, const GameController* controller) noexcept {
-  if (player >= PAD_MAX_CONTROLLERS) {
+  if (player >= PAD_MAX_ASSIGNABLE_PORTS) {
     return;
   }
 

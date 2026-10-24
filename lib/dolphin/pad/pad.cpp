@@ -423,7 +423,7 @@ void PADSetPortForIndex(const u32 idx, const u32 port) {
     return;
   }
 
-  if (port >= PAD_MAX_CONTROLLERS) {
+  if (port >= PAD_MAX_ASSIGNABLE_PORTS) {
     return;
   }
 
